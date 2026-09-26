@@ -1,0 +1,27 @@
+# Dependencies (huge, can be recreated with npm install)
+node_modules/
+
+# Secrets - NEVER commit these
+.env
+.env.local
+.env.*.local
+
+# Build output
+dist/
+build/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Editor / OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Test output
+coverage/

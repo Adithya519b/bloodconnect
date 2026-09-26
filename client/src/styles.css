@@ -1,0 +1,199 @@
+/* BloodConnect admin — plain CSS only (no Tailwind by design). */
+
+:root {
+  --blood: #b3121f;
+  --blood-dark: #7d0d16;
+  --bg: #f6f7f9;
+  --card: #ffffff;
+  --text: #1d2530;
+  --muted: #6b7684;
+  --border: #e3e7ec;
+  --ok: #14743a;
+  --warn: #9a6b00;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* ---------- login ---------- */
+
+.login-wrap {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.login-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 32px;
+  width: 100%;
+  max-width: 380px;
+  text-align: center;
+}
+
+.login-card h1 {
+  margin: 0 0 8px;
+  color: var(--blood);
+  font-size: 1.5rem;
+}
+
+.login-card input {
+  width: 100%;
+  padding: 10px 12px;
+  margin: 16px 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 1rem;
+}
+
+.login-card button {
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--blood);
+  color: #fff;
+  font-size: 1rem;
+  cursor: pointer;
+}
+
+.login-card button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* ---------- dashboard ---------- */
+
+.dashboard {
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 24px 16px 48px;
+}
+
+.dashboard-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.dashboard-header h1 {
+  margin: 0;
+  color: var(--blood);
+  font-size: 1.4rem;
+}
+
+button.ghost {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 14px;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.stat-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.stat-card.ok .stat-value {
+  color: var(--ok);
+}
+
+.stat-card.warn .stat-value {
+  color: var(--warn);
+}
+
+.stat-value {
+  font-size: 1.8rem;
+  font-weight: 700;
+}
+
+.stat-label {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.panel {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 20px;
+}
+
+.panel h2 {
+  margin: 0 0 12px;
+  font-size: 1.1rem;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95rem;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+th {
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.error {
+  background: #fdecec;
+  border: 1px solid #f5c2c2;
+  color: var(--blood-dark);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.disclaimer {
+  font-size: 0.85rem;
+}
+
+@media (max-width: 560px) {
+  th,
+  td {
+    padding: 6px 6px;
+    font-size: 0.85rem;
+  }
+}
