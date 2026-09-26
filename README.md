@@ -761,6 +761,53 @@ ours), then run the two `git remote` / `git push` commands above.
 
 ---
 
+## Deployment (free tier)
+
+Architecture: **Atlas M0 (free DB)** + **Render free web service** (Node backend + bot)
++ **Render free static site** (dashboard). Total cost: ₹0.
+
+### A. Backend — Render Web Service
+
+1. Repo on GitHub (Step 16) → render.com → **New +** → **Web Service** → connect the repo.
+2. Settings: **Root Directory** `server` · Build `npm install` · Start `npm start` ·
+   Instance type **Free**.
+3. Environment tab — add exactly these (values from your local `server/.env`):
+   `TELEGRAM_BOT_TOKEN`, `MONGODB_URI`, `ADMIN_API_KEY`.
+4. Atlas → Network Access → add `0.0.0.0/0` (Render has no fixed IPs on free tier).
+
+### B. Dashboard — Render Static Site
+
+**New +** → **Static Site** → same repo → Root Directory `client`, Build
+`npm install && npm run build`, Publish `dist`. If the backend URL differs from the
+blueprint default, set `VITE_API_URL` (e.g. `https://bloodconnect-server.onrender.com`)
+and rebuild. Rewrite rule `/* → /index.html` so page refreshes work.
+
+### One-click alternative
+
+A `render.yaml` Blueprint ships with the repo: Render → **New +** → **Blueprint** →
+pick the repo → fill the 3 secrets → Deploy. Secrets are set in the dashboard, never in
+the file.
+
+### Free-tier limits you must know (checked 2026 — re-verify before your demo)
+
+| Limit | Meaning in practice |
+| ----- | ------------------- |
+| Web service spins down after ~15 min without inbound HTTP | The bot stops responding. Polling traffic doesn't count — only HTTP requests do. First visitor after a sleep waits 30–60 s. |
+| ~750 free instance hours/month | Enough for one free service 24/7; a second one shares the budget. |
+| Static sites free | No limits that matter for the demo. |
+| Atlas M0 free forever | Shared CPU; fine for prototype traffic. |
+| No persistent disk | Nothing on the server filesystem survives a restart — MongoDB is the only storage. |
+
+**Keeping the bot awake during the demo** (pick one):
+
+1. **Cron pings** (recommended): free uptime pinger hitting `https://<service>.onrender.com/api/health` every 5–10 min.
+2. **Send an HTTP request manually** before the demo (open the health URL in a browser) — wakes the service in ~30 s.
+3. Leave the Render dashboard open on the Logs tab — activity can keep it alive while you watch.
+
+Render's own docs, not the blueprint, are the source of truth if limits change.
+
+---
+
 ## Limitations (prototype only)
 
 - Conversation sessions live in memory, so a server restart drops in-progress wizards.

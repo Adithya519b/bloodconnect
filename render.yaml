@@ -1,0 +1,48 @@
+# Render Blueprint — deploys BOTH services in one click (New > Blueprint,
+# after this repo is on GitHub). Free tiers (as of 2026, subject to change):
+#   - web service: spins down after ~15 min without inbound traffic (30-60 s
+#     cold start) and includes ~750 free instance hours/month
+#   - static site: free
+#   - MongoDB: NOT included here — use MongoDB Atlas M0 (free) separately.
+#
+# Secrets are set in the Render dashboard (Environment tab), never in this file:
+#   TELEGRAM_BOT_TOKEN, MONGODB_URI, ADMIN_API_KEY
+#
+# POLLING VS WEBHOOK: this blueprint runs the bot in polling mode (fine for a
+# demo; continuous polling usually prevents spin-downs). Switching to a proper
+# webhook is Step 18 of the build plan — not implemented yet, so do NOT set
+# any webhook variables for now.
+
+services:
+  - type: web
+    name: bloodconnect-server
+    runtime: node
+    plan: free
+    rootDir: server
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false # set in the Render dashboard — never commit it
+      - key: MONGODB_URI
+        sync: false # set in the Render dashboard — never commit it
+      - key: ADMIN_API_KEY
+        sync: false # set in the Render dashboard — never commit it
+
+  - type: web
+    name: bloodconnect-dashboard
+    runtime: static
+    rootDir: client
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    # Point the dashboard at the backend service (Render injects the URL).
+    envVars:
+      - key: VITE_API_URL
+        value: https://bloodconnect-server.onrender.com
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
