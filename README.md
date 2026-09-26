@@ -730,12 +730,43 @@ and the main-menu keyboard comes back at the bottom.
 
 ---
 
+## Git & GitHub
+
+The project is a Git repository with `main` as the default branch. `.gitignore` blocks
+`node_modules/`, **all `.env` files** (secrets!), `dist/`, logs and editor files — verify
+before every push with `git status`.
+
+Local commands used:
+
+```bash
+git init -b main          # create the repo (already done)
+git add .                 # stage everything except git-ignored files
+git status               # ALWAYS check nothing sensitive is staged
+git commit -m "message" # save a snapshot
+git branch -M main       # rename the branch to main
+git remote add origin https://github.com/<your-username>/bloodconnect.git
+git push -u origin main  # first push; afterwards just: git push
+```
+
+To publish: create an empty repository on github.com (**no** README/.gitignore — we have
+ours), then run the two `git remote` / `git push` commands above.
+
+**Golden rules**
+
+1. Secrets live only in `server/.env` (git-ignored). The committed `.env.example` is a
+   template with empty values.
+2. Never `git push` a commit that contains a token or password. If it happens: rotate the
+   secret in Atlas/BotFather immediately, then rewrite history.
+3. Commit in small logical steps so the history explains the project.
+
+---
+
 ## Limitations (prototype only)
 
-- Donor profiles persist in Atlas, but **no emergency requests exist yet** (Step 7/8).
-- Sessions live in memory, so a restart loses in-progress conversations.
-- No authentication. Nothing is production-ready.
-- Telegram polling only runs while the Node process is running on a computer that is awake.
+- Conversation sessions live in memory, so a server restart drops in-progress wizards.
+- Admin API uses a single shared key — prototype protection, not real security.
+- No donor verification of any kind; Telegram polling requires the backend to be awake.
+- One active request per requester; matching is capped at 50 donors per request.
 
 ---
 
