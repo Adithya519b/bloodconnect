@@ -146,6 +146,24 @@ export function buildRemoveKeyboard() {
  * until the user shares — Telegram Desktop keeps collapsed keyboards hidden
  * behind the small keyboard icon, and a one-time keyboard only makes that worse.
  */
+/**
+ * A keyboard with one special button. `request_contact: true` makes Telegram
+ * pop up its native "Share your phone number" dialog — the user taps once
+ * and the app sends their phone number. The number arrives on the message as
+ * `message.contact.phone_number` (Telegram-verified: it is the number bound
+ * to the sender's own account when they share it this way).
+ * Used by donors after accepting a request so the requester gets a REAL way
+ * to reach them instead of only a possibly-missing @username.
+ */
+export function buildContactRequestKeyboard(text = "📱 Share My Phone Number") {
+  return {
+    keyboard: [[{ text, request_contact: true }]],
+    resize_keyboard: true,
+    one_time_keyboard: true,
+    input_field_placeholder: "Tap 📱 Share My Phone Number",
+  };
+}
+
 export function buildLocationRequestKeyboard(text = "📍 Share Location") {
   return {
     keyboard: [[{ text, request_location: true }]],

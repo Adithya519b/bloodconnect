@@ -5,26 +5,27 @@ import { toGeoJsonPoint } from "./donorService.js";
 /** Statuses that still count as "active" for a requester. */
 const ACTIVE_STATUSES = ["OPEN", "DONOR_NOTIFIED", "DONOR_FOUND"];
 
+/** Upper bound on concurrent active requests per requester (prototype guard). */
+export const MAX_ACTIVE_REQUESTS = 3;
+
 /**
  * Creates the BloodRequest document from validated wizard data.
  * The location is converted to GeoJSON exactly like donor locations.
  *
- * Guard: one requester may have only ONE active request at a time — it keeps
- * the /status and /cancel flows unambiguous for the prototype.
+ * A requester may have SEVERAL active requests at once (e.g. different blood
+ * groups for different patients), capped at MAX_ACTIVE_REQUESTS so /status
+ * stays readable and donors are not flooded.
  *
- * Returns { request, created } where created=false when an active request
- * already exists (request is null in that case).
+ * Returns { request, created } where created=false when the cap is reached
+ * (request is null in that case).
  */
 export async function createBloodRequest(requestData) {
   const { requesterId, bloodGroup, unitsRequired, location, radiusKm } = requestData;
 
-  const existingActive = await BloodRequest.findOne({
-    requesterId,
-    status: { $in: ACTIVE_STATUSES },
-  }).lean();
+  const activeCount = await countActiveRequestsForRequester(requesterId);
 
-  if (existingActive) {
-    return { request: null, created: false, existingActive };
+  if (activeCount >= MAX_ACTIVE_REQUESTS) {
+    return { request: null, created: false, activeCount };
   }
 
   const request = await BloodRequest.create({
@@ -79,9 +80,9 @@ export async function recordDonorRejection(requestId, donorId) {
 }
 
 /**
- * Cancels a request (Step 13). The status guard in the filter means a request
- * that was accepted, completed or already cancelled cannot be flipped — the
- * update simply matches nothing.
+ * Cancels a request (status-guarded). The filter means a request that was
+ * accepted, completed or already cancelled cannot be flipped — the update
+ * simply matches nothing.
  *
  * Returns the updated document, or null when there was nothing to cancel.
  */
@@ -98,8 +99,39 @@ export async function cancelRequest(requestId, requesterId) {
 }
 
 /**
- * The requester's active request, or null. Used by /cancel to tell the user
- * exactly what is being withdrawn.
+ * HARD DELETE (Step 16): removes the requester's OPEN/DONOR_NOTIFIED request
+ * from the database entirely — cancelled requests leave no document behind.
+ *
+ * The filter is status-guarded on purpose:
+ * - a DONOR_FOUND request (a donor is on their way) can never be deleted
+ *   through this path,
+ * - a COMPLETED/CANCELLED request is untouched,
+ * - a request that races from DONOR_NOTIFIED to DONOR_FOUND between the
+ *   donor's tap and this delete simply does not match (deleteMany returns
+ *   deletedCount: 0), so the donor's acceptance can never vanish.
+ *
+ * Returns the deleted document (via findOneAndDelete), or null when nothing
+ * matched — callers use this to tell the user exactly what was removed.
+ */
+export async function deleteRequest(requestId, requesterId) {
+  return BloodRequest.findOneAndDelete({
+    _id: requestId,
+    requesterId,
+    status: { $in: ["OPEN", "DONOR_NOTIFIED"] },
+  }).lean();
+}
+
+/** How many active (OPEN/DONOR_NOTIFIED/DONOR_FOUND) requests a requester has. */
+export async function countActiveRequestsForRequester(requesterId) {
+  return BloodRequest.countDocuments({
+    requesterId,
+    status: { $in: ACTIVE_STATUSES },
+  });
+}
+
+/**
+ * The requester's most recent active request, or null. Kept for flows that
+ * need "the newest live request" (used by the /cancel fallback message).
  */
 export async function getActiveRequestForRequester(requesterId) {
   return BloodRequest.findOne({

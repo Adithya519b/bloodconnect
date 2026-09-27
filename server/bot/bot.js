@@ -8,6 +8,7 @@ import {
   clearSession,
   handleCallbackQuery,
   handleCommand,
+  handleDonorContact,
   handleLocationMessage,
   handleTextMessage,
   handleUnknownInput,
@@ -24,6 +25,14 @@ async function handleMessage(message) {
   // Location comes as a message with `location` instead of `text`.
   if (message.location) {
     await handleLocationMessage(telegramId, chatId, message.location, message.from.username || null);
+    return;
+  }
+
+  // A shared contact (donor sending their phone number after accepting a
+  // request without a username). Checked before the text handlers because a
+  // contact message carries no text.
+  if (message.contact) {
+    await handleDonorContact(telegramId, chatId, message.contact);
     return;
   }
 

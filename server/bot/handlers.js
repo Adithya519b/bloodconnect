@@ -14,6 +14,7 @@ import {
 import {
   buildReplyKeyboard,
   buildInlineKeyboard,
+  buildContactRequestKeyboard,
   buildLocationRequestKeyboard,
   buildRemoveKeyboard,
   answerCallbackQuery,
@@ -26,17 +27,26 @@ import {
   setDonorAvailability,
   upsertDonor,
 } from "../services/donorService.js";
+import { BloodRequest } from "../models/BloodRequest.js";
 import {
   acceptRequest,
-  cancelRequest,
+  countActiveRequestsForRequester,
   createBloodRequest,
+  deleteRequest,
   getActiveRequestForRequester,
   getRecentRequestsForRequester,
   getRequestById,
+  MAX_ACTIVE_REQUESTS,
   recordDonorRejection,
 } from "../services/requestService.js";
 import { matchDonorsForRequest } from "../services/matchingService.js";
-import { notifyMatchedDonors, notifyRequester } from "../services/notificationService.js";
+import {
+  buildDonorFoundTextMessage,
+  buildShareContactRequestMessage,
+  notifyMatchedDonors,
+  notifyRequester,
+  notifyRequesterWithPhone,
+} from "../services/notificationService.js";
 
 const HEALTH_DISCLAIMER =
   "⚠️ Prototype: BloodConnect does not verify donor eligibility. Blood group, availability and medical suitability must be verified by qualified medical professionals or blood banks. In a real emergency, contact a hospital, blood bank or emergency service first.";
@@ -272,16 +282,16 @@ export async function handleRequestConfirmation(callbackData, telegramId, chatId
     });
 
     if (!created) {
+      // Cap reached — the user manages their open requests via /status.
       await sendWithMenu(
         chatId,
         [
-          "⚠️ You already have an active blood request:",
+          `⚠️ You already have ${existingActive} active blood request(s).`,
           "",
-          `Request ID: ${existingActive._id}`,
-          `Blood Group: ${existingActive.bloodGroup} (${existingActive.unitsRequired} unit(s), ${existingActive.radiusKm} KM)`,
-          `Status: ${existingActive.status}`,
+          `For this prototype you can keep up to ${MAX_ACTIVE_REQUESTS} active at once.`,
           "",
-          "Use /cancel to close it before creating a new one.",
+          "Open /status and use the ❌ Cancel button to remove one,",
+          "then send /request again.",
         ].join("\n")
       );
       return;
@@ -418,7 +428,7 @@ export async function handleDonorResponse(callbackData, donorId, chatId) {
       } else {
         await sendMessage(
           chatId,
-          "⚠️ This request is no longer active (cancelled or completed)."
+          "⚠️ This request is no longer active (cancelled or removed)."
         );
       }
       return;
@@ -427,10 +437,27 @@ export async function handleDonorResponse(callbackData, donorId, chatId) {
     // This donor won the claim — confirm to them...
     await sendMessage(chatId, buildDonorAcceptedMessage(claimed));
 
-    // ...and notify the requester with the donor's public @username.
+    // ...and notify the requester with REAL contact info (Step 16):
+    // 1. The donor has a @username -> the requester gets a t.me link and can
+    //    reach them immediately. Done.
+    // 2. No username -> the requester only learns that a donor accepted;
+    //    the donor is asked in-chat to share their phone number, and the
+    //    requester receives it the moment it arrives (handleDonorContact).
     try {
       const donor = await getDonorByTelegramId(donorId);
-      await notifyRequester(claimed, donor || { username: null });
+      const shapedDonor = donor || { username: null, name: null };
+
+      await notifyRequester(claimed, shapedDonor);
+
+      if (!shapedDonor.username) {
+        donorContactSessions.set(donorId, {
+          requestId: claimed._id.toString(),
+          requesterId: claimed.requesterId,
+        });
+        await sendMessage(chatId, buildShareContactRequestMessage(), {
+          reply_markup: buildContactRequestKeyboard(),
+        });
+      }
     } catch (error) {
       // The claim already succeeded; a failed requester message must not
       // roll it back — log it so it can be retried manually.
@@ -447,6 +474,85 @@ export async function handleDonorResponse(callbackData, donorId, chatId) {
   }
 }
 
+/**
+ * Handles the donor's 📱 phone-number share (message.contact) sent after
+ * accepting a request without a username. The number is forwarded to the
+ * requester as a 📞 contact message; the donor gets a confirmation.
+ *
+ * Safety notes:
+ * - contact.user_id is checked against the sender — Telegram guarantees the
+ *   share came from the account itself, but the check costs nothing and
+ *   makes the intent explicit.
+ * - The pending-session Map makes the share refuse to attach itself to a
+ *   request that already moved on (donor swapped, request deleted...).
+ * - Only the phone number is forwarded — never the contact's name, user_id
+ *   or any other payload Telegram includes.
+ */
+export async function handleDonorContact(telegramId, chatId, contact) {
+  const pending = donorContactSessions.get(telegramId);
+
+  if (!pending) {
+    await sendWithMenu(
+      chatId,
+      [
+        "📱 Thanks! Right now a phone number is only needed after you accept",
+        "a blood request from a donor who has no Telegram username.",
+      ].join("\n")
+    );
+    return;
+  }
+
+  const phone = contact?.phone_number;
+  if (!phone || contact.user_id !== telegramId) {
+    await sendMessage(
+      chatId,
+      "⚠️ Please share your OWN contact with the 📱 button, or type /cancel.",
+      { reply_markup: buildContactRequestKeyboard() }
+    );
+    return;
+  }
+
+  donorContactSessions.delete(telegramId);
+
+  const request = await getRequestById(pending.requestId);
+
+  // The request may have been deleted/changed since the acceptance.
+  if (!request || request.acceptedDonor !== telegramId) {
+    await sendWithMenu(
+      chatId,
+      "⚠️ The request you accepted is no longer active — the number was NOT shared with anyone."
+    );
+    return;
+  }
+
+  const donor = await getDonorByTelegramId(telegramId);
+
+  try {
+    await notifyRequesterWithPhone(request, donor || { name: null }, phone);
+  } catch (error) {
+    console.error(
+      `[bot] Contact info for request ${pending.requestId} could not be delivered: ${error.message}`
+    );
+    await sendMessage(
+      chatId,
+      "❌ The number could not be delivered just now. Please tap the 📱 button again."
+    );
+    donorContactSessions.set(telegramId, pending); // let them retry
+    return;
+  }
+
+  await sendWithMenu(
+    chatId,
+    [
+      "✅ Done — your contact number was sent to the requester.",
+      "",
+      "They will call or message you to coordinate the donation.",
+      "",
+      HEALTH_DISCLAIMER,
+    ].join("\n")
+  );
+}
+
 const NOT_UNDERSTOOD_MESSAGE = [
   "🤖 I did not understand that message.",
   "",
@@ -460,6 +566,15 @@ const NOT_UNDERSTOOD_MESSAGE = [
  * It resets whenever the server restarts, which is fine for a demo.
  */
 const userSessions = new Map();
+
+/**
+ * Pending "please share your phone number" prompts, keyed by donor telegramId:
+ * { requestId, requesterId }. Set right after a donor without a username
+ * accepts a request; consumed by handleDonorContact. In-memory like the
+ * wizard sessions — a restart simply means the donor can re-tap the button
+ * and the requester still has the t.me path when a username exists.
+ */
+const donorContactSessions = new Map();
 
 export function getSession(telegramId) {
   if (!userSessions.has(telegramId)) {
@@ -780,6 +895,11 @@ export async function handleCallbackQuery(callbackQuery) {
     return;
   }
 
+  if (action === "reqcancel") {
+    await handleRequestCancelButton(value, from.id, message.chat.id);
+    return;
+  }
+
   if (action === "respond") {
     await handleDonorResponse(callbackData, from.id, message.chat.id);
     return;
@@ -925,6 +1045,17 @@ export async function handleLocationMessage(telegramId, chatId, location, userna
 export async function handleTextMessage(telegramId, chatId, text) {
   const session = getSession(telegramId);
 
+  // Waiting for the donor's phone-number share — typed text would only
+  // confuse; point them back to the button (or /cancel to skip).
+  if (donorContactSessions.has(telegramId)) {
+    await sendMessage(
+      chatId,
+      "⚠️ I'm waiting for your phone number. Tap the 📱 Share My Phone Number button, or type /cancel.",
+      { reply_markup: buildContactRequestKeyboard() }
+    );
+    return;
+  }
+
   if (session.step === "register:location" || session.step === "request:location") {
     await sendMessage(
       chatId,
@@ -989,12 +1120,34 @@ export async function showRequestStatus(telegramId, chatId) {
       return;
     }
 
+    const activeCount = await countActiveRequestsForRequester(telegramId);
     const lines = ["📋 My Blood Requests", ""];
     for (const request of requests) {
       lines.push(formatRequestRow(request), "");
     }
-    lines.push("Active requests can be withdrawn with /cancel.");
-    await sendWithMenu(chatId, lines.join("\n"));
+
+    // Every still-open request gets its own ❌ Cancel button under the list.
+    // The buttons carry the request's _id, so with several active requests
+    // each one can be withdrawn individually — the button state is checked
+    // server-side on tap (handleRequestCancelButton), never trusted.
+    const cancellableRows = requests
+      .filter((request) => request.status === "OPEN" || request.status === "DONOR_NOTIFIED")
+      .map((request) => [
+        {
+          text: `❌ Cancel ${request.bloodGroup} (${request.unitsRequired}u)`,
+          callbackData: `reqcancel:${request._id}`,
+        },
+      ]);
+
+    lines.push(
+      activeCount > 0
+        ? `You have ${activeCount} active request(s). Use a ❌ button below (or /cancel) to withdraw one.`
+        : "No active requests. Send /request to create a new one."
+    );
+
+    await sendMessage(chatId, lines.join("\n"), {
+      reply_markup: cancellableRows.length > 0 ? buildInlineKeyboard(cancellableRows) : undefined,
+    });
   } catch (error) {
     console.error(`[bot] Could not load requests for ${telegramId}: ${error.message}`);
     await sendWithMenu(chatId, "❌ Could not load your requests. Please try again in a moment.");
@@ -1002,62 +1155,131 @@ export async function showRequestStatus(telegramId, chatId) {
 }
 
 /**
- * Withdraws the requester's active request (OPEN/DONOR_NOTIFIED -> CANCELLED,
- * status-guarded). Donors already alerted are not messaged again and no new
- * notifications go out for a cancelled request.
- * Returns true when the situation was handled (cancelled, raced, or
- * already-accepted) so the caller stops; false when there was no request.
+ * Handles a ❌ Cancel button under /status (callbackData "reqcancel:<id>").
+ * The request is DELETED from the database (Step 16) — cancelled requests
+ * leave nothing behind. Every guard is re-checked here server-side:
+ * ownership, claimable status, and the race against a donor tapping accept
+ * in the same instant (deleteRequest only matches OPEN/DONOR_NOTIFIED, so a
+ * request that was just claimed survives untouched).
  */
-async function cancelActiveRequest(telegramId, chatId) {
-  const request = await getActiveRequestForRequester(telegramId);
+async function handleRequestCancelButton(requestId, telegramId, chatId) {
+  const deleted = await deleteRequest(requestId, telegramId);
 
-  if (!request) {
-    return false;
-  }
+  if (deleted) {
+    const notifiedText =
+      deleted.matchedDonors.length > 0
+        ? `${deleted.matchedDonors.length} donor(s) had been notified — no further notifications will be sent.`
+        : "No donors had been notified yet.";
 
-  // A donor already claimed it — cancellation would break the workflow.
-  if (request.status === "DONOR_FOUND") {
     await sendWithMenu(
       chatId,
       [
-        "⚠️ Your request has already been accepted by a donor, so it cannot be cancelled here.",
+        "🗑️ Request deleted.",
         "",
-        `Request ID: ${request._id}`,
+        `Request ID: ${deleted._id}`,
+        `Blood Group: ${deleted.bloodGroup} (${deleted.unitsRequired} unit(s))`,
         "",
-        "Coordinate with the donor through Telegram.",
+        notifiedText,
+        "",
+        "The request data was removed from the database.",
       ].join("\n")
     );
-    return true;
+    return;
   }
 
-  const cancelled = await cancelRequest(request._id, telegramId);
+  // Nothing deleted — either already accepted, completed or removed earlier.
+  const current = await getRequestById(requestId);
 
-  if (!cancelled) {
-    // Raced with an acceptance between the two queries.
+  if (!current || current.requesterId !== telegramId) {
+    await sendWithMenu(chatId, "⚠️ That request no longer exists.");
+    return;
+  }
+
+  if (current.status === "DONOR_FOUND") {
     await sendWithMenu(
       chatId,
-      "⚠️ That request just changed state and can no longer be cancelled."
+      [
+        "⚠️ This request has already been accepted by a donor, so it cannot be deleted here.",
+        "",
+        `Request ID: ${current._id}`,
+        "",
+        "Coordinate with the donor through their contact info.",
+      ].join("\n")
     );
-    return true;
+    return;
   }
-
-  const notifiedText =
-    cancelled.matchedDonors.length > 0
-      ? `${cancelled.matchedDonors.length} donor(s) had been notified — no further notifications will be sent.`
-      : "No donors had been notified yet.";
 
   await sendWithMenu(
     chatId,
-    [
-      "❌ Request cancelled.",
-      "",
-      `Request ID: ${cancelled._id}`,
-      `Blood Group: ${cancelled.bloodGroup} (${cancelled.unitsRequired} unit(s))`,
-      "",
-      notifiedText,
-    ].join("\n")
+    "⚠️ That request just changed state and can no longer be deleted."
   );
-  return true;
+}/**
+ * Deletes ALL of the requester's still-open requests (OPEN/DONOR_NOTIFIED)
+ * from the database — /cancel with several active requests clears every one
+ * of them. DONOR_FOUND requests are never touched: a donor is already on
+ * their way and cancellation would break their expectation.
+ * Returns the list of deleted documents (empty when nothing was open).
+ */
+async function deleteActiveRequests(telegramId, chatId) {
+  const activeRequests = await BloodRequest.find({
+    requesterId: telegramId,
+    status: { $in: ["OPEN", "DONOR_NOTIFIED"] },
+  })
+    .sort({ createdAt: -1 })
+    .lean();
+
+  if (activeRequests.length === 0) {
+    return [];
+  }
+
+  const deletedRequests = [];
+  for (const request of activeRequests) {
+    // deleteRequest re-checks the status guard one by one, so a request that
+    // is claimed by a donor mid-loop is skipped instead of being destroyed.
+    const deleted = await deleteRequest(request._id, telegramId);
+    if (deleted) {
+      deletedRequests.push(deleted);
+    }
+  }
+
+  if (deletedRequests.length === 0) {
+    await sendWithMenu(
+      chatId,
+      "⚠️ Your open requests just changed state and can no longer be deleted."
+    );
+    return [];
+  }
+
+  const totalNotified = deletedRequests.reduce(
+    (sum, request) => sum + request.matchedDonors.length,
+    0
+  );
+  const skipped = activeRequests.length - deletedRequests.length;
+
+  const lines = [
+    `🗑️ ${deletedRequests.length} active request(s) deleted.`,
+    "",
+  ];
+  for (const request of deletedRequests) {
+    lines.push(`• ${request.bloodGroup} (${request.unitsRequired} unit(s)) — ID: ${request._id}`);
+  }
+  lines.push(
+    "",
+    totalNotified > 0
+      ? `${totalNotified} donor notification(s) had gone out — no further notifications will be sent.`
+      : "No donors had been notified yet.",
+    "",
+    "The request data was removed from the database."
+  );
+  if (skipped > 0) {
+    lines.push(
+      "",
+      `⚠️ ${skipped} request(s) were skipped — already accepted by a donor (check /status).`
+    );
+  }
+
+  await sendWithMenu(chatId, lines.join("\n"));
+  return deletedRequests;
 }
 
 export async function handleCommand(telegramId, chatId, command) {
@@ -1086,25 +1308,39 @@ export async function handleCommand(telegramId, chatId, command) {
     case "/cancel": {
       const session = getSession(telegramId);
 
+      // A pending "share your phone number" prompt is cancelled too.
+      donorContactSessions.delete(telegramId);
+
       // 1) A running wizard cancels the conversation itself.
       if (session.step) {
         await cancelActiveOperation(telegramId, chatId);
         return;
       }
 
-      // 2) Otherwise withdraw the active blood request, if any.
+      // 2) Otherwise delete ALL open blood requests (Step 16: hard delete).
       if (!isDatabaseReady()) {
         await sendWithMenu(chatId, DB_DOWN_MESSAGE);
         return;
       }
 
       try {
-        const hadRequest = await cancelActiveRequest(telegramId, chatId);
-        if (!hadRequest) {
-          await sendWithMenu(
-            chatId,
-            "❌ Nothing to cancel — no operation is running and no active request."
-          );
+        const deletedAny = await deleteActiveRequests(telegramId, chatId);
+        if (deletedAny.length === 0) {
+          const foundCount = await countActiveRequestsForRequester(telegramId);
+          if (foundCount > 0) {
+            await sendWithMenu(
+              chatId,
+              [
+                "⚠️ Your remaining request(s) have already been accepted by a donor,",
+                "so they cannot be deleted here. Coordinate through their contact info.",
+              ].join("\n")
+            );
+          } else {
+            await sendWithMenu(
+              chatId,
+              "❌ Nothing to cancel — no operation is running and no active request."
+            );
+          }
         }
       } catch (error) {
         console.error(`[bot] Cancellation failed for ${telegramId}: ${error.message}`);

@@ -1,6 +1,18 @@
 import { buildInlineKeyboard, sendMessage } from "./telegramService.js";
 
 /**
+ * Donor-found messages are sent with parse_mode: "HTML" so the contact line
+ * can be a real t.me deep link. Escape every dynamic value — user-controlled
+ * strings (usernames, names) must never be able to inject markup.
+ */
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+/**
  * The notification abstraction (Step 10, spec section 27).
  *
  * The matching engine (Step 9) calls notifyMatchedDonors() and never needs to
@@ -46,12 +58,58 @@ export function buildDonorAlertKeyboard(requestId) {
 }
 
 /**
- * Builds the 🎉 message the requester receives when a donor accepts (Step 11
- * will call this). Only the donor's Telegram @username is shared — never the
- * phone number or any other private data.
+ * Builds the 🎉 message the requester receives when a donor accepts.
+ *
+ * Contact info, best-effort in order:
+ * 1. @username            -> a t.me/<username> deep link: one tap opens the
+ *                            donor's chat even though requesters cannot
+ *                            search a donor by telegramId.
+ * 2. Name only            -> a ⚠️ call to share the donor's phone number
+ *                            (the donor gets that prompt in the same moment).
+ *
+ * Sent with parse_mode: "HTML" (see notifyRequester) — a plain-text fallback
+ * builder (buildDonorFoundTextMessage) exists for the tests and for failure
+ * paths where markup must be avoided.
  */
 export function buildDonorFoundMessage(request, donor) {
-  const donorLine = donor.username ? `@${donor.username}` : "a registered donor";
+  if (donor?.username) {
+    const username = escapeHtml(donor.username);
+    return (
+      "🎉 DONOR FOUND!\n" +
+      "\n" +
+      `Blood Group: ${escapeHtml(request.bloodGroup)}\n` +
+      `Required Units: ${request.unitsRequired}\n` +
+      "\n" +
+      `👤 Donor: <a href="https://t.me/${donor.username}">@${username}</a>\n` +
+      "Tap the name to open their chat and coordinate directly.\n" +
+      "\n" +
+      `Request ID: ${request._id}\n` +
+      "\n" +
+      HEALTH_DISCLAIMER
+    );
+  }
+
+  const nameLine = donor?.name ? escapeHtml(donor.name) : "a registered donor";
+  return (
+    "🎉 DONOR FOUND!\n" +
+    "\n" +
+    `Blood Group: ${escapeHtml(request.bloodGroup)}\n` +
+    `Required Units: ${request.unitsRequired}\n` +
+    "\n" +
+    `👤 Donor: ${nameLine}\n` +
+    "⚠️ The donor has no Telegram username.\n" +
+    "They have been asked to share their phone number — you will get it here\n" +
+    "in a moment.\n" +
+    "\n" +
+    `Request ID: ${request._id}\n` +
+    "\n" +
+    HEALTH_DISCLAIMER
+  );
+}
+
+/** Plain-text variant of the donor-found message (no HTML, no deep link). */
+export function buildDonorFoundTextMessage(request, donor) {
+  const donorLine = donor?.username ? `@${donor.username}` : donor?.name || "a registered donor";
   return (
     "🎉 DONOR FOUND!\n" +
     "\n" +
@@ -62,6 +120,44 @@ export function buildDonorFoundMessage(request, donor) {
     "Please contact the donor through Telegram and coordinate safely.\n" +
     "\n" +
     `Request ID: ${request._id}\n` +
+    "\n" +
+    HEALTH_DISCLAIMER
+  );
+}
+
+/**
+ * Shown to the DONOR right after they accept when they have no @username.
+ * Without it the requester would have no way to reach them at all.
+ */
+export function buildShareContactRequestMessage() {
+  return (
+    "📱 One more step — please share a contact number.\n" +
+    "\n" +
+    "You do not have a public Telegram username, so the requester cannot\n" +
+    "open a chat with you by themselves.\n" +
+    "\n" +
+    "Tap the button below to send your phone number. It goes ONLY to the\n" +
+    "requester of this request.\n"
+  );
+}
+
+/**
+ * The 📞 message the requester receives after the donor shares their phone
+ * number. Telegram deep links also work for plain numbers: the requester can
+ * open the donor's chat even without a username.
+ */
+export function buildDonorPhoneMessage(request, donor, phone) {
+  const nameLine = donor?.name ? escapeHtml(donor.name) : "The donor";
+  return (
+    "📞 DONOR CONTACT INFO\n" +
+    "\n" +
+    `Blood Group: ${escapeHtml(request.bloodGroup)}\n` +
+    `Required Units: ${request.unitsRequired}\n` +
+    "\n" +
+    `${nameLine} shared a contact number for your request:\n` +
+    `<a href="tel:${phone}">${escapeHtml(phone)}</a>\n` +
+    "\n" +
+    "Please coordinate safely and verify eligibility.\n" +
     "\n" +
     HEALTH_DISCLAIMER
   );
@@ -113,9 +209,21 @@ export async function notifyMatchedDonors(request, donors) {
 }
 
 /**
- * Sends the 🎉 "DONOR FOUND" message to the requester (used from Step 11).
- * In a private chat, chatId === telegramId.
+ * Sends the 🎉 "DONOR FOUND" message to the requester (Step 11).
+ * In a private chat, chatId === telegramId. HTML mode powers the t.me link.
  */
 export async function notifyRequester(request, donor) {
-  await sendMessage(request.requesterId, buildDonorFoundMessage(request, donor));
+  await sendMessage(request.requesterId, buildDonorFoundMessage(request, donor), {
+    parse_mode: "HTML",
+  });
+}
+
+/**
+ * Forwards the donor's shared phone number to the requester as a clean
+ * 📞 contact card. HTML mode powers the tel: link.
+ */
+export async function notifyRequesterWithPhone(request, donor, phone) {
+  await sendMessage(request.requesterId, buildDonorPhoneMessage(request, donor, phone), {
+    parse_mode: "HTML",
+  });
 }

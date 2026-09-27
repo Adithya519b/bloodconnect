@@ -21,8 +21,11 @@ import { toGeoJsonPoint, upsertDonor } from "../services/donorService.js";
 import {
   acceptRequest,
   cancelRequest,
+  countActiveRequestsForRequester,
   createBloodRequest,
+  deleteRequest,
   getRequestById,
+  MAX_ACTIVE_REQUESTS,
   recordDonorRejection,
 } from "../services/requestService.js";
 import { matchDonorsForRequest } from "../services/matchingService.js";
@@ -30,6 +33,8 @@ import {
   buildDonorAlertMessage,
   buildDonorAlertKeyboard,
   buildDonorFoundMessage,
+  buildDonorFoundTextMessage,
+  buildDonorPhoneMessage,
 } from "../services/notificationService.js";
 
 dotenv.config({ quiet: true });
@@ -151,7 +156,9 @@ async function main() {
     `got: [${reqLon}, ${reqLat}]`
   );
 
-  const duplicateAttempt = await createBloodRequest({
+  // 6b. Multi-request support (Step 16): a requester may keep SEVERAL active
+  //     requests at once, capped at MAX_ACTIVE_REQUESTS.
+  const secondReq = await createBloodRequest({
     requesterId: REQUESTER_ID,
     bloodGroup: "A+",
     unitsRequired: 1,
@@ -159,9 +166,49 @@ async function main() {
     radiusKm: 5,
   });
   check(
-    "Second active request for same requester is blocked",
-    duplicateAttempt.created === false && duplicateAttempt.request === null
+    "Second ACTIVE request for same requester is allowed",
+    secondReq.created,
+    secondReq.created ? "" : "multi-request support missing"
   );
+
+  const thirdReq = await createBloodRequest({
+    requesterId: REQUESTER_ID,
+    bloodGroup: "B+",
+    unitsRequired: 1,
+    location: TEST_DONOR.location,
+    radiusKm: 5,
+  });
+  check("Third active request is allowed", thirdReq.created);
+
+  const fourthReqAttempt = await createBloodRequest({
+    requesterId: REQUESTER_ID,
+    bloodGroup: "AB-",
+    unitsRequired: 1,
+    location: TEST_DONOR.location,
+    radiusKm: 5,
+  });
+  check(
+    `Fourth active request is blocked (cap = ${MAX_ACTIVE_REQUESTS})`,
+    fourthReqAttempt.created === false && fourthReqAttempt.request === null
+  );
+  check(
+    "Active request count equals the cap",
+    (await countActiveRequestsForRequester(REQUESTER_ID)) === MAX_ACTIVE_REQUESTS
+  );
+
+  // 6c. Hard delete (Step 16): /cancel removes the document entirely.
+  const deletedReq = await deleteRequest(secondReq.request._id, REQUESTER_ID);
+  check("Hard delete removes an OPEN request", deletedReq !== null);
+
+  const goneReq = await getRequestById(secondReq.request._id);
+  check("Deleted request no longer exists in the database", goneReq === null);
+  check(
+    "Active count drops after hard delete",
+    (await countActiveRequestsForRequester(REQUESTER_ID)) === MAX_ACTIVE_REQUESTS - 1
+  );
+
+  const deleteMissing = await deleteRequest(secondReq.request._id, REQUESTER_ID);
+  check("Deleting an already-removed request is a no-op (null)", deleteMissing === null);
 
   // 7. Matching engine (Step 9) — plant donors at controlled distances and
   //    verify the engine keeps exactly the one valid donor. 1° latitude ≈ 111 km.
@@ -216,10 +263,33 @@ async function main() {
       noButton.callback_data === `respond:no:${request._id}`
   );
 
-  const foundText = buildDonorFoundMessage(fetchedRequest, { username: "sample_test_donor" });
+  const foundText = buildDonorFoundTextMessage(fetchedRequest, { username: "sample_test_donor" });
   check(
-    "Donor-found message shares username + request id",
+    "Donor-found text message shares username + request id",
     foundText.includes("@sample_test_donor") && foundText.includes(String(request._id))
+  );
+
+  const foundHtml = buildDonorFoundMessage(fetchedRequest, { username: "sample_test_donor" });
+  check(
+    "Donor-found HTML message carries the t.me contact link",
+    foundHtml.includes('href="https://t.me/sample_test_donor"') &&
+      foundHtml.includes(String(request._id))
+  );
+
+  const noUsernameMessage = buildDonorFoundMessage(fetchedRequest, { name: "Sample Donor" });
+  check(
+    "Donor without username asks for a phone share",
+    noUsernameMessage.includes("Sample Donor") && noUsernameMessage.includes("phone number")
+  );
+
+  const phoneMessage = buildDonorPhoneMessage(
+    fetchedRequest,
+    { name: "Sample Donor" },
+    "+911234567890"
+  );
+  check(
+    "Phone contact message carries the shared number",
+    phoneMessage.includes("tel:+911234567890") && phoneMessage.includes("+911234567890")
   );
 
   // 9. Atomic acceptance (Step 11) — two donors tap "I CAN DONATE" simultaneously.
@@ -279,6 +349,15 @@ async function main() {
   const cancelledClaim = await acceptRequest(request._id, DONOR_A);
   check("Cancelled request cannot be accepted", cancelledClaim === null);
 
+  // A DONOR_FOUND (claimed) request must be impossible to hard-delete —
+  // the donor is already on their way.
+  const deleteClaimed = await deleteRequest(winner._id, REQUESTER_ID);
+  check(
+    "A DONOR_FOUND request cannot be hard-deleted",
+    deleteClaimed === null,
+    deleteClaimed ? "deleted a claimed request!" : "correctly null"
+  );
+
   const rej = await recordDonorRejection(request._id, DONOR_B);
   check("Rejection recorded once", rej.modifiedCount === 1);
   await recordDonorRejection(request._id, DONOR_B);
@@ -289,8 +368,10 @@ async function main() {
     `rejectedDonors: [${storedRequest.rejectedDonors.join(", ")}]`
   );
 
-  // 10. Cancellation flow (Step 13) — status-guarded withdraw.
-  const secondRequest = await createBloodRequest({
+  // 10. cancelRequest still exists as a soft-cancel for edge flows — the
+  //     bot's /cancel now hard-deletes (6c), but the guard must keep working.
+  //     A fresh request is created first (a slot was freed by the deletes above).
+  const fifthReq = await createBloodRequest({
     requesterId: REQUESTER_ID,
     bloodGroup: "B+",
     unitsRequired: 1,
@@ -298,15 +379,15 @@ async function main() {
     radiusKm: 5,
   });
   check(
-    "New request creatable after previous was cancelled",
-    secondRequest.created,
-    secondRequest.created ? "" : "active-request guard did not clear"
+    "New request creatable after another was deleted (cap freed)",
+    fifthReq.created,
+    fifthReq.created ? "" : "cap did not free after delete"
   );
 
-  const cancelledOnce = await cancelRequest(secondRequest.request._id, REQUESTER_ID);
+  const cancelledOnce = await cancelRequest(fifthReq.request._id, REQUESTER_ID);
   check("cancelRequest flips OPEN -> CANCELLED", cancelledOnce?.status === "CANCELLED");
 
-  const cancelledTwice = await cancelRequest(secondRequest.request._id, REQUESTER_ID);
+  const cancelledTwice = await cancelRequest(fifthReq.request._id, REQUESTER_ID);
   check("Double-cancel is a no-op (null)", cancelledTwice === null);
 
   // 11. Cleanup — remove ALL test documents (deleteMany also cleans up

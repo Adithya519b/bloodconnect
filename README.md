@@ -1,6 +1,6 @@
 # 🩸 BloodConnect — Emergency Blood Donor Telegram Bot
 
-**Status:** Step 15 complete (React admin dashboard over the REST API — full core bot workflow done)
+**Status:** Step 16 complete (multi-request support, hard-delete on cancel, real donor contact info)
 
 > ⚠️ **Prototype disclaimer** — BloodConnect is a student prototype that connects people who
 > urgently need blood with registered blood donors. It does **not** verify blood group, donor
@@ -370,6 +370,53 @@ Active requests can be withdrawn with /cancel.
 
 The core emergency workflow is now **end-to-end**: register → request → match → notify
 → accept → requester notified → cancel/status tracking.
+
+## Step 16 — Multiple requests, hard delete, real contact info (new)
+
+Three workflow upgrades requested after the dashboard step:
+
+### 1. Several active requests per requester
+
+The old "one active request per requester" guard is gone. A requester can now keep up to
+**`MAX_ACTIVE_REQUESTS = 3`** simultaneous requests (e.g. different blood groups for different
+patients). Submitting a 4th returns the count and points to /status instead of saving.
+
+- **/status** now shows every request with a **❌ Cancel <group> (<units>u)** inline button under
+  the list — each still-open request can be withdrawn individually.
+- **/cancel** (typed) deletes **all** open requests at once and reports the per-request list.
+- Acceptance is still one-donor-per-request and unchanged: `acceptRequest()` keeps its atomic guard.
+
+### 2. Cancel now HARD-DELETES the request data
+
+Cancelled requests no longer linger as `CANCELLED` rows. `deleteRequest()` in
+`services/requestService.js` removes the document from Atlas entirely (`findOneAndDelete`).
+
+The delete filter is status-guarded on purpose: only `OPEN` / `DONOR_NOTIFIED` requests can be
+deleted, so a `DONOR_FOUND` request (a donor is already on their way) can never vanish —
+`deleteRequest` returns null for it and the user is told to coordinate through the donor's
+contact info instead. A request claimed mid-delete simply does not match (deletedCount: 0),
+so a donor's acceptance can never be destroyed by a race.
+
+### 3. Valid donor contact info after acceptance
+
+Previously the requester only got a possibly-missing `@username` and was told to "contact the
+donor through Telegram" — with no way to search a user by id. Now:
+
+1. **Donor has a @username** — the 🎉 DONOR FOUND message (sent with `parse_mode: "HTML"`)
+   contains a real deep link: **Tap <https://t.me/<username>> to open their chat**.
+2. **No username** — the requester is told so, and the donor is immediately asked in-chat to
+   tap a native **📱 Share My Phone Number** button (`request_contact: true`, see
+   `buildContactRequestKeyboard` in `telegramService.js`). The Telegram-verified number is
+   forwarded to the requester as a 📞 DONOR CONTACT INFO message with a `tel:` link —
+   only the phone number is ever forwarded, nothing else from the contact payload.
+
+The pending "share your phone" prompt lives in a `donorContactSessions` Map; it is consumed
+exactly once, refuses a contact whose `user_id` does not match the sender, and is dropped
+safely if the request was deleted in the meantime (nothing is shared with anyone).
+
+New message builders in `services/notificationService.js` (all covered by `npm run test:db`):
+`buildDonorFoundMessage` (HTML + t.me link), `buildDonorFoundTextMessage` (plain fallback),
+`buildShareContactRequestMessage`, `buildDonorPhoneMessage` + `notifyRequesterWithPhone`.
 
 ## Step 15 — React admin dashboard (new)
 
@@ -810,19 +857,19 @@ Render's own docs, not the blueprint, are the source of truth if limits change.
 
 ## Limitations (prototype only)
 
-- Conversation sessions live in memory, so a server restart drops in-progress wizards.
+- Conversation sessions (and pending phone-number prompts) live in memory, so a server restart drops them.
 - Admin API uses a single shared key — prototype protection, not real security.
 - No donor verification of any kind; Telegram polling requires the backend to be awake.
-- One active request per requester; matching is capped at 50 donors per request.
+- Up to 3 active requests per requester; matching is capped at 50 donors per request.
+- Cancel hard-deletes OPEN/DONOR_NOTIFIED requests; DONOR_FOUND requests cannot be deleted from the bot.
 
 ---
 
 ## Next steps
 
-**Step 14 — Consolidated testing & error handling** is largely baked in (33 automated
-database checks, validated wizards, guarded transitions). After that,
-**Step 15 — React admin dashboard**: totals, donor-found counts and the recent-requests
-table over the existing REST endpoints.
+**Step 16** added multi-request support, hard-delete on cancel and real donor contact info
+(44 automated database checks now). Remaining ideas: mark a DONOR_FOUND request COMPLETED
+once the donation happens, and Telegram webhook mode for production.
 
 ## License
 
